@@ -3962,7 +3962,7 @@ brcmf_sdio_probe_attach(struct brcmf_sdio *bus)
 		goto fail;
 	}
 
-	bus->ci = brcmf_chip_attach(sdiodev, &brcmf_sdio_buscore_ops);
+	bus->ci = brcmf_chip_attach(sdiodev, &brcmf_sdio_buscore_ops, sdiodev->settings);
 	if (IS_ERR(bus->ci)) {
 		brcmf_err("brcmf_chip_attach failed!\n");
 		bus->ci = NULL;

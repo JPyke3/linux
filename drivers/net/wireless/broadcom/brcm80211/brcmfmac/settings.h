@@ -6,6 +6,8 @@
 #ifndef BRCMFMAC_SETTINGS_H
 #define BRCMFMAC_SETTINGS_H
 
+#include <linux/platform_data/brcmfmac.h>
+
 /* Definition for the device specific settings are defined here. One struct
  * is used called brcmf_mp_device. The device specific settings is part of
  * the drvr struct and should be initialized on every brcmf_attach.
@@ -21,6 +23,7 @@
  * @ignore_probe_fail: Ignore probe failure.
  * @country_codes: If available, pointer to struct for translating country codes
  * @bus: Bus specific platform data. Only SDIO at the mmoment.
+ * @rambase_addr: Manually specified FW shared rambase address.
  */
 struct brcmf_mp_device {
 	bool		p2p_enable;
@@ -34,6 +37,7 @@ struct brcmf_mp_device {
 	union {
 		struct brcmfmac_sdio_pd sdio;
 	} bus;
+	u32		rambase_addr;
 };
 
 #endif /* BRCMFMAC_SETTINGS_H */

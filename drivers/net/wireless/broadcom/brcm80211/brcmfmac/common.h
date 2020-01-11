@@ -6,7 +6,6 @@
 #define BRCMFMAC_COMMON_H
 
 #include <linux/platform_device.h>
-#include <linux/platform_data/brcmfmac.h>
 #include "fwil_types.h"
 #include "settings.h"
 

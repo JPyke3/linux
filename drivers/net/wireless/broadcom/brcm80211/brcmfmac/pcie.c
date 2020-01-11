@@ -1772,7 +1772,7 @@ static void brcmf_pcie_setup(struct device *dev, int ret,
 	nvram_len = fwreq->items[BRCMF_PCIE_FW_NVRAM].nv_data.len;
 	kfree(fwreq);
 
-	ret = brcmf_chip_get_raminfo(devinfo->ci);
+	ret = brcmf_chip_get_raminfo(devinfo->ci, devinfo->settings);
 	if (ret) {
 		brcmf_err(bus, "Failed to get RAM info\n");
 		goto fail;
@@ -1884,7 +1884,7 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	devinfo->pdev = pdev;
 	pcie_bus_dev = NULL;
-	devinfo->ci = brcmf_chip_attach(devinfo, &brcmf_pcie_buscore_ops);
+	devinfo->ci = brcmf_chip_attach(devinfo, &brcmf_pcie_buscore_ops, devinfo->settings);
 	if (IS_ERR(devinfo->ci)) {
 		ret = PTR_ERR(devinfo->ci);
 		devinfo->ci = NULL;

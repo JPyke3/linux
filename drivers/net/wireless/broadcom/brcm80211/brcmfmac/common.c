@@ -67,6 +67,10 @@ static int brcmf_iapp_enable;
 module_param_named(iapp, brcmf_iapp_enable, int, 0);
 MODULE_PARM_DESC(iapp, "Enable partial support for the obsoleted Inter-Access Point Protocol");
 
+static uint brcmf_rambase_addr;
+module_param_named(rambase_addr, brcmf_rambase_addr, uint, 0);
+MODULE_PARM_DESC(rambase_addr, "Manually specify FW shared rambase address");
+
 #ifdef DEBUG
 /* always succeed brcmf_bus_started() */
 static int brcmf_ignore_probe_fail;
@@ -416,6 +420,7 @@ struct brcmf_mp_device *brcmf_get_module_param(struct device *dev,
 #ifdef DEBUG
 	settings->ignore_probe_fail = !!brcmf_ignore_probe_fail;
 #endif
+	settings->rambase_addr = brcmf_rambase_addr;
 
 	if (bus_type == BRCMF_BUSTYPE_SDIO)
 		settings->bus.sdio.txglomsz = brcmf_sdiod_txglomsz;

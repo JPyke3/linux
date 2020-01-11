@@ -733,7 +733,7 @@ static u32 brcmf_chip_tcm_rambase(struct brcmf_chip_priv *ci)
 	return 0;
 }
 
-int brcmf_chip_get_raminfo(struct brcmf_chip *pub)
+int brcmf_chip_get_raminfo(struct brcmf_chip *pub, struct brcmf_mp_device *settings)
 {
 	struct brcmf_chip_priv *ci = container_of(pub, struct brcmf_chip_priv,
 						  pub);
@@ -744,7 +744,8 @@ int brcmf_chip_get_raminfo(struct brcmf_chip *pub)
 	if (mem) {
 		mem_core = container_of(mem, struct brcmf_core_priv, pub);
 		ci->pub.ramsize = brcmf_chip_tcm_ramsize(mem_core);
-		ci->pub.rambase = brcmf_chip_tcm_rambase(ci);
+		ci->pub.rambase = (settings != NULL && settings->rambase_addr > 0) ? settings->rambase_addr
+										   : brcmf_chip_tcm_rambase(ci);
 		if (!ci->pub.rambase) {
 			brcmf_err("RAM base not provided with ARM CR4 core\n");
 			return -EINVAL;
@@ -755,7 +756,8 @@ int brcmf_chip_get_raminfo(struct brcmf_chip *pub)
 			mem_core = container_of(mem, struct brcmf_core_priv,
 						pub);
 			ci->pub.ramsize = brcmf_chip_sysmem_ramsize(mem_core);
-			ci->pub.rambase = brcmf_chip_tcm_rambase(ci);
+			ci->pub.rambase = (settings != NULL && settings->rambase_addr > 0) ? settings->rambase_addr
+											   : brcmf_chip_tcm_rambase(ci);
 			if (!ci->pub.rambase) {
 				brcmf_err("RAM base not provided with ARM CA7 core\n");
 				return -EINVAL;
@@ -941,7 +943,7 @@ int brcmf_chip_dmp_erom_scan(struct brcmf_chip_priv *ci)
 	return 0;
 }
 
-static int brcmf_chip_recognition(struct brcmf_chip_priv *ci)
+static int brcmf_chip_recognition(struct brcmf_chip_priv *ci, struct brcmf_mp_device *settings)
 {
 	struct brcmf_core *core;
 	u32 regdata;
@@ -1014,7 +1016,7 @@ static int brcmf_chip_recognition(struct brcmf_chip_priv *ci)
 		brcmf_chip_set_passive(&ci->pub);
 	}
 
-	return brcmf_chip_get_raminfo(&ci->pub);
+	return brcmf_chip_get_raminfo(&ci->pub, settings);
 }
 
 static void brcmf_chip_disable_arm(struct brcmf_chip_priv *chip, u16 id)
@@ -1088,7 +1090,8 @@ static int brcmf_chip_setup(struct brcmf_chip_priv *chip)
 }
 
 struct brcmf_chip *brcmf_chip_attach(void *ctx,
-				     const struct brcmf_buscore_ops *ops)
+				     const struct brcmf_buscore_ops *ops,
+				     struct brcmf_mp_device *settings)
 {
 	struct brcmf_chip_priv *chip;
 	int err = 0;
@@ -1117,7 +1120,7 @@ struct brcmf_chip *brcmf_chip_attach(void *ctx,
 	if (err < 0)
 		goto fail;
 
-	err = brcmf_chip_recognition(chip);
+	err = brcmf_chip_recognition(chip, settings);
 	if (err < 0)
 		goto fail;
 
