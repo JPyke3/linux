@@ -3,12 +3,14 @@
  * Ilitek IL97680A panels driver
  *
  * Copyright (c) 2026 Teguh Sobirin <teguh@sobir.in>
+ * Copyright (c) 2026 Jacob Pyke <jacob@pyk.ee>
  */
 
 #include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
 
@@ -21,32 +23,28 @@
 #include <drm/drm_of.h>
 #include <drm/drm_panel.h>
 
-struct panel_info {
+struct il97680a {
 	struct drm_panel panel;
 	struct drm_connector *connector;
 	struct mipi_dsi_device *dsi;
-	const struct panel_desc *desc;
+	const struct il97680a_desc *desc;
 	enum drm_panel_orientation orientation;
 
 	struct gpio_desc *reset_gpio;
 	struct regulator_bulk_data *supplies;
+	/* Protects panel power state and serializes DSI transfers. */
+	struct mutex lock;
+	bool powered;
+	bool prepared;
+	bool enabled;
 };
 
-struct panel_desc {
-	unsigned int width_mm;
-	unsigned int height_mm;
-
-	unsigned int bpc;
-	unsigned int lanes;
-	unsigned long mode_flags;
-	enum mipi_dsi_pixel_format format;
-
-	const struct drm_display_mode *modes;
-	unsigned int num_modes;
-	int (*init_sequence)(struct panel_info *pinfo);
+struct il97680a_desc {
+	const struct regulator_bulk_data *supplies;
+	unsigned int num_supplies;
 };
 
-static const struct regulator_bulk_data panel_supplies[] = {
+static const struct regulator_bulk_data il97680a_rpnova_supplies[] = {
 	{ .supply = "vdd" },
 	{ .supply = "vddio" },
 	{ .supply = "vci" },
@@ -54,74 +52,18 @@ static const struct regulator_bulk_data panel_supplies[] = {
 	{ .supply = "vdd28" },
 };
 
-static inline struct panel_info *to_panel_info(struct drm_panel *panel)
+static const struct regulator_bulk_data il97680a_rpduo_supplies[] = {
+	{ .supply = "vdd" },
+	{ .supply = "vddio" },
+	{ .supply = "vci" },
+};
+
+static inline struct il97680a *to_il97680a(struct drm_panel *panel)
 {
-	return container_of(panel, struct panel_info, panel);
+	return container_of(panel, struct il97680a, panel);
 }
 
-static int il97680a_get_current_mode(struct panel_info *pinfo)
-{
-	struct drm_connector *connector = pinfo->connector;
-	struct drm_crtc_state *crtc_state;
-	unsigned int i;
-
-	if (!connector || !connector->state || !connector->state->crtc)
-		return 0;
-
-	crtc_state = connector->state->crtc->state;
-
-	for (i = 0; i < pinfo->desc->num_modes; i++) {
-		if (drm_mode_match(&crtc_state->mode,
-				   &pinfo->desc->modes[i],
-				   DRM_MODE_MATCH_TIMINGS | DRM_MODE_MATCH_CLOCK))
-			return i;
-	}
-
-	return 0;
-}
-
-static int il97680a_rpnova_init_sequence(struct panel_info *pinfo)
-{
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = pinfo->dsi };
-	int cur_mode = il97680a_get_current_mode(pinfo);
-	int cur_vrefresh = drm_mode_vrefresh(&pinfo->desc->modes[cur_mode]);
-
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x08);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xc8, 0x62);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x21);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xa4, 0x38);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x23);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x85, 0x15);
-
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x00);
-
-	if (cur_vrefresh == 120)
-		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x60, 0x00);
-	else
-		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x60, 0x01);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x6d, 0x00);
-
-	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
-
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY,
-				     0x20);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
-				     0x0d, 0x75, 0x00, 0x00);
-
-	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
-	mipi_dsi_msleep(&dsi_ctx, 120);
-
-	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
-	mipi_dsi_msleep(&dsi_ctx, 50);
-
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x22);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe1, 0x01);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x00);
-
-	return dsi_ctx.accum_err;
-}
-
-static const struct drm_display_mode il97680a_rpnova_modes[] = {
+static const struct drm_display_mode il97680a_retroid_modes[] = {
 	{
 		/* 120Hz */
 		.clock = (1280 + 12 + 2 + 8) * (960 + 12 + 2 + 24) * 120 / 1000,
@@ -148,70 +90,185 @@ static const struct drm_display_mode il97680a_rpnova_modes[] = {
 	}
 };
 
-static const struct panel_desc il97680a_rpnova_desc = {
-	.modes = il97680a_rpnova_modes,
-	.num_modes = ARRAY_SIZE(il97680a_rpnova_modes),
-	.width_mm = 91,
-	.height_mm = 68,
-	.bpc = 8,
-	.lanes = 4,
-	.format = MIPI_DSI_FMT_RGB888,
-	.mode_flags = MIPI_DSI_MODE_NO_EOT_PACKET |
-		      MIPI_DSI_CLOCK_NON_CONTINUOUS |
-		      MIPI_DSI_MODE_LPM,
-	.init_sequence = il97680a_rpnova_init_sequence,
-};
-
-static void il97680a_reset(struct panel_info *pinfo)
+static int il97680a_get_current_mode(struct il97680a *pinfo)
 {
-	gpiod_set_value_cansleep(pinfo->reset_gpio, 0);
-	usleep_range(20000, 21000);
-	gpiod_set_value_cansleep(pinfo->reset_gpio, 1);
-	usleep_range(20000, 21000);
-	gpiod_set_value_cansleep(pinfo->reset_gpio, 0);
-	usleep_range(20000, 21000);
-}
+	struct drm_connector *connector = pinfo->connector;
+	struct drm_crtc_state *crtc_state;
+	unsigned int i;
 
-static int il97680a_prepare(struct drm_panel *panel)
-{
-	struct panel_info *pinfo = to_panel_info(panel);
-	int ret;
+	if (!connector || !connector->state || !connector->state->crtc)
+		return 0;
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(panel_supplies), pinfo->supplies);
-	if (ret < 0)
-		return ret;
+	crtc_state = connector->state->crtc->state;
+	if (!crtc_state)
+		return -EINVAL;
 
-	il97680a_reset(pinfo);
-
-	ret = pinfo->desc->init_sequence(pinfo);
-	if (ret < 0) {
-		gpiod_set_value_cansleep(pinfo->reset_gpio, 1);
-		regulator_bulk_disable(ARRAY_SIZE(panel_supplies), pinfo->supplies);
-		return ret;
+	for (i = 0; i < ARRAY_SIZE(il97680a_retroid_modes); i++) {
+		if (drm_mode_match(&crtc_state->mode,
+				   &il97680a_retroid_modes[i],
+				   DRM_MODE_MATCH_TIMINGS | DRM_MODE_MATCH_CLOCK))
+			return i;
 	}
 
-	return 0;
+	return -EINVAL;
 }
 
-static int il97680a_disable(struct drm_panel *panel)
+static int il97680a_init_sequence(struct il97680a *pinfo, unsigned int mode)
 {
-	struct panel_info *pinfo = to_panel_info(panel);
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = pinfo->dsi };
+	int vrefresh = drm_mode_vrefresh(&il97680a_retroid_modes[mode]);
 
-	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
-	mipi_dsi_msleep(&dsi_ctx, 20);
-	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x08);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xc8, 0x62);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x21);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xa4, 0x38);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x23);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x85, 0x15);
+
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x00);
+
+	if (vrefresh == 120)
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x60, 0x00);
+	else
+		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x60, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x6d, 0x00);
+
+	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
+
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY,
+				     0x20);
+
+	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
 	mipi_dsi_msleep(&dsi_ctx, 120);
 
 	return dsi_ctx.accum_err;
 }
 
+static const struct il97680a_desc il97680a_rpnova_desc = {
+	.supplies = il97680a_rpnova_supplies,
+	.num_supplies = ARRAY_SIZE(il97680a_rpnova_supplies),
+};
+
+static const struct il97680a_desc il97680a_rpduo_desc = {
+	.supplies = il97680a_rpduo_supplies,
+	.num_supplies = ARRAY_SIZE(il97680a_rpduo_supplies),
+};
+
+static void il97680a_reset(struct il97680a *pinfo)
+{
+	gpiod_set_value_cansleep(pinfo->reset_gpio, 0);
+	usleep_range(20000, 21000);
+	gpiod_set_value_cansleep(pinfo->reset_gpio, 1);
+	usleep_range(20000, 21000);
+	gpiod_set_value_cansleep(pinfo->reset_gpio, 0);
+	usleep_range(20000, 21000);
+}
+
+static void il97680a_power_off(struct il97680a *pinfo)
+{
+	int ret;
+
+	pinfo->enabled = false;
+	pinfo->prepared = false;
+	gpiod_set_value_cansleep(pinfo->reset_gpio, 1);
+
+	if (!pinfo->powered)
+		return;
+
+	ret = regulator_bulk_disable(pinfo->desc->num_supplies, pinfo->supplies);
+	if (ret)
+		dev_err(pinfo->panel.dev, "Failed to disable supplies: %d\n", ret);
+	else
+		pinfo->powered = false;
+}
+
+static int il97680a_prepare(struct drm_panel *panel)
+{
+	struct il97680a *pinfo = to_il97680a(panel);
+	int mode, ret;
+
+	guard(mutex)(&pinfo->lock);
+
+	mode = il97680a_get_current_mode(pinfo);
+	if (mode < 0) {
+		dev_err(panel->dev, "Invalid display mode\n");
+		return mode;
+	}
+
+	if (!pinfo->powered) {
+		ret = regulator_bulk_enable(pinfo->desc->num_supplies, pinfo->supplies);
+		if (ret)
+			return ret;
+		pinfo->powered = true;
+	}
+
+	il97680a_reset(pinfo);
+
+	ret = il97680a_init_sequence(pinfo, mode);
+	if (ret) {
+		il97680a_power_off(pinfo);
+		return ret;
+	}
+
+	pinfo->prepared = true;
+
+	return 0;
+}
+
+static int il97680a_enable(struct drm_panel *panel)
+{
+	struct il97680a *pinfo = to_il97680a(panel);
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = pinfo->dsi };
+
+	guard(mutex)(&pinfo->lock);
+
+	if (!pinfo->prepared)
+		return -EPERM;
+
+	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 50);
+
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x22);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xe1, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x5a, 0xa5, 0x00);
+
+	if (!dsi_ctx.accum_err)
+		pinfo->enabled = true;
+
+	return dsi_ctx.accum_err;
+}
+
+static int il97680a_disable(struct drm_panel *panel)
+{
+	struct il97680a *pinfo = to_il97680a(panel);
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = pinfo->dsi };
+
+	guard(mutex)(&pinfo->lock);
+
+	pinfo->enabled = false;
+	if (!pinfo->prepared)
+		return 0;
+
+	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
+	msleep(20);
+
+	return 0;
+}
+
 static int il97680a_unprepare(struct drm_panel *panel)
 {
-	struct panel_info *pinfo = to_panel_info(panel);
+	struct il97680a *pinfo = to_il97680a(panel);
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = pinfo->dsi };
 
-	gpiod_set_value_cansleep(pinfo->reset_gpio, 1);
-	regulator_bulk_disable(ARRAY_SIZE(panel_supplies), pinfo->supplies);
+	guard(mutex)(&pinfo->lock);
+
+	pinfo->enabled = false;
+	if (pinfo->prepared) {
+		mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
+		msleep(120);
+	}
+
+	il97680a_power_off(pinfo);
 
 	return 0;
 }
@@ -219,12 +276,12 @@ static int il97680a_unprepare(struct drm_panel *panel)
 static int il97680a_get_modes(struct drm_panel *panel,
 			      struct drm_connector *connector)
 {
-	struct panel_info *pinfo = to_panel_info(panel);
+	struct il97680a *pinfo = to_il97680a(panel);
 	struct drm_display_mode *mode;
 	unsigned int i;
 
-	for (i = 0; i < pinfo->desc->num_modes; i++) {
-		mode = drm_mode_duplicate(connector->dev, &pinfo->desc->modes[i]);
+	for (i = 0; i < ARRAY_SIZE(il97680a_retroid_modes); i++) {
+		mode = drm_mode_duplicate(connector->dev, &il97680a_retroid_modes[i]);
 		if (!mode)
 			return -ENOMEM;
 
@@ -236,22 +293,23 @@ static int il97680a_get_modes(struct drm_panel *panel,
 		drm_mode_probed_add(connector, mode);
 	}
 
-	connector->display_info.width_mm = pinfo->desc->width_mm;
-	connector->display_info.height_mm = pinfo->desc->height_mm;
-	connector->display_info.bpc = pinfo->desc->bpc;
+	connector->display_info.width_mm = 91;
+	connector->display_info.height_mm = 68;
+	connector->display_info.bpc = 8;
 	pinfo->connector = connector;
 
-	return pinfo->desc->num_modes;
+	return ARRAY_SIZE(il97680a_retroid_modes);
 }
 
 static enum drm_panel_orientation il97680a_get_orientation(struct drm_panel *panel)
 {
-	struct panel_info *pinfo = to_panel_info(panel);
+	struct il97680a *pinfo = to_il97680a(panel);
 
 	return pinfo->orientation;
 }
 
 static const struct drm_panel_funcs il97680a_panel_funcs = {
+	.enable = il97680a_enable,
 	.disable = il97680a_disable,
 	.prepare = il97680a_prepare,
 	.unprepare = il97680a_unprepare,
@@ -261,58 +319,50 @@ static const struct drm_panel_funcs il97680a_panel_funcs = {
 
 static int il97680a_bl_update_status(struct backlight_device *bl)
 {
-	struct mipi_dsi_device *dsi = bl_get_data(bl);
-	u16 brightness = backlight_get_brightness(bl);
+	struct il97680a *pinfo = bl_get_data(bl);
+	struct mipi_dsi_device *dsi = pinfo->dsi;
+	unsigned long mode_flags;
 	int ret;
 
+	guard(mutex)(&pinfo->lock);
+
+	if (!pinfo->enabled)
+		return 0;
+
+	mode_flags = dsi->mode_flags;
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
-	ret = mipi_dsi_dcs_set_display_brightness_large(dsi, brightness);
-	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+	ret = mipi_dsi_dcs_set_display_brightness_large(dsi, backlight_get_brightness(bl));
+	dsi->mode_flags = mode_flags;
 
 	return ret;
 }
 
-static int il97680a_bl_get_brightness(struct backlight_device *bl)
-{
-	struct mipi_dsi_device *dsi = bl_get_data(bl);
-	u16 brightness;
-	int ret;
-
-	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
-	ret = mipi_dsi_dcs_get_display_brightness_large(dsi, &brightness);
-	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
-	if (ret < 0)
-		return ret;
-
-	return brightness;
-}
-
 static const struct backlight_ops il97680a_bl_ops = {
 	.update_status = il97680a_bl_update_status,
-	.get_brightness = il97680a_bl_get_brightness,
 };
 
 static struct backlight_device *
-il97680a_create_backlight(struct mipi_dsi_device *dsi)
+il97680a_create_backlight(struct il97680a *pinfo)
 {
-	struct device *dev = &dsi->dev;
+	struct device *dev = &pinfo->dsi->dev;
 	const struct backlight_properties props = {
 		.type = BACKLIGHT_RAW,
 		.brightness = 3445,
 		.max_brightness = 3445,
+		.scale = BACKLIGHT_SCALE_NON_LINEAR,
 	};
 
-	return devm_backlight_device_register(dev, dev_name(dev), dev, dsi,
+	return devm_backlight_device_register(dev, dev_name(dev), dev, pinfo,
 					      &il97680a_bl_ops, &props);
 }
 
 static int il97680a_probe(struct mipi_dsi_device *dsi)
 {
 	struct device *dev = &dsi->dev;
-	struct panel_info *pinfo;
+	struct il97680a *pinfo;
 	int ret;
 
-	pinfo = devm_drm_panel_alloc(dev, struct panel_info, panel,
+	pinfo = devm_drm_panel_alloc(dev, struct il97680a, panel,
 				     &il97680a_panel_funcs,
 				     DRM_MODE_CONNECTOR_DSI);
 	if (IS_ERR(pinfo))
@@ -322,12 +372,16 @@ static int il97680a_probe(struct mipi_dsi_device *dsi)
 	if (!pinfo->desc)
 		return -ENODEV;
 
-	ret = devm_regulator_bulk_get_const(dev, ARRAY_SIZE(panel_supplies),
-					    panel_supplies, &pinfo->supplies);
+	ret = devm_mutex_init(dev, &pinfo->lock);
+	if (ret)
+		return ret;
+
+	ret = devm_regulator_bulk_get_const(dev, pinfo->desc->num_supplies,
+					    pinfo->desc->supplies, &pinfo->supplies);
 	if (ret < 0)
 		return ret;
 
-	pinfo->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
+	pinfo->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(pinfo->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(pinfo->reset_gpio),
 				     "Failed to get reset-gpios\n");
@@ -339,12 +393,13 @@ static int il97680a_probe(struct mipi_dsi_device *dsi)
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "Failed to get orientation\n");
 
-	dsi->lanes = pinfo->desc->lanes;
-	dsi->format = pinfo->desc->format;
-	dsi->mode_flags = pinfo->desc->mode_flags;
+	dsi->lanes = 4;
+	dsi->format = MIPI_DSI_FMT_RGB888;
+	dsi->mode_flags = MIPI_DSI_MODE_NO_EOT_PACKET |
+			  MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
 	pinfo->panel.prepare_prev_first = true;
 
-	pinfo->panel.backlight = il97680a_create_backlight(dsi);
+	pinfo->panel.backlight = il97680a_create_backlight(pinfo);
 	if (IS_ERR(pinfo->panel.backlight))
 		return dev_err_probe(dev, PTR_ERR(pinfo->panel.backlight),
 				     "Failed to create backlight\n");
@@ -358,7 +413,7 @@ static int il97680a_probe(struct mipi_dsi_device *dsi)
 
 static const struct of_device_id il97680a_of_match[] = {
 	{ .compatible = "retroidpocket,rpnova-panel", .data = &il97680a_rpnova_desc },
-	{ .compatible = "retroidpocket,rpduo-panel-bottom", .data = &il97680a_rpnova_desc },
+	{ .compatible = "retroidpocket,rpduo-panel-bottom", .data = &il97680a_rpduo_desc },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, il97680a_of_match);
@@ -373,5 +428,6 @@ static struct mipi_dsi_driver il97680a_driver = {
 module_mipi_dsi_driver(il97680a_driver);
 
 MODULE_AUTHOR("Teguh Sobirin <teguh@sobir.in>");
+MODULE_AUTHOR("Jacob Pyke <jacob@pyk.ee>");
 MODULE_DESCRIPTION("DRM driver for Ilitek IL97680A based MIPI DSI panels");
 MODULE_LICENSE("GPL");

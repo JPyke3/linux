@@ -8,6 +8,7 @@ title: Ilitek IL97680A based DSI panels
 
 maintainers:
   - Teguh Sobirin <teguh@sobir.in>
+  - Jacob Pyke <jacob@pyk.ee>
 
 description:
   The Ilitek IL97680A is a DSI display driver IC driving the 1280x960
@@ -15,6 +16,18 @@ description:
 
 allOf:
   - $ref: panel-common.yaml#
+  - if:
+      properties:
+        compatible:
+          const: retroidpocket,rpnova-panel
+    then:
+      required:
+        - vdd18-supply
+        - vdd28-supply
+    else:
+      properties:
+        vdd18-supply: false
+        vdd28-supply: false
 
 properties:
   compatible:
